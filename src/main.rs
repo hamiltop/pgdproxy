@@ -6,21 +6,24 @@ use pgdproxy::listener::{Config, Listener};
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(short, long)]
-    client_port: u16,
+    binding: String,
     #[arg(short, long)]
     target_address: String,
+    #[arg(short, long)]
+    debug_binding: Option<String>,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let client_port = args.client_port;
+    let binding = args.binding;
     let target_address = args.target_address;
+    let debug_binding = args.debug_binding;
     Listener::start(Config {
-        port: client_port,
+        binding,
         target_address,
+        debug_binding,
         ch: None,
-        port_mapper: None,
     })
     .await
     .unwrap();
@@ -28,26 +31,25 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use pgdproxy::listener::{self, Listener, PortMapper};
+    use pgdproxy::listener::{self, Listener};
     use sqlx::{Connection, Executor, Row};
     use tokio::{sync::oneshot, task::JoinHandle};
 
-    async fn setup(client_port: u16) -> (oneshot::Receiver<()>, JoinHandle<()>, PortMapper) {
+    async fn setup(client_port: u16) -> (oneshot::Receiver<()>, JoinHandle<()>, u16) {
+        let binding = format!("localhost:{client_port}");
         let target_address = "localhost:54320".to_string();
-        let port_mapper = PortMapper::new();
+        let debug_binding = "localhost:44440".to_string();
         let (s, r) = oneshot::channel::<()>();
-        let pm = port_mapper.clone();
         let listener = tokio::spawn(async move {
-            let port_mapper = pm;
             let _r = Listener::start(listener::Config {
-                port: client_port,
+                binding,
                 target_address,
                 ch: Some(s),
-                port_mapper: Some(port_mapper),
+                debug_binding: Some(debug_binding),
             })
             .await;
         });
-        (r, listener, port_mapper)
+        (r, listener, 44440)
     }
 
     #[tokio::test]
@@ -75,7 +77,7 @@ mod tests {
     async fn test_debugging() {
         let client_port = 8765;
         let value = 123843;
-        let (r, listener, port_mapper) = setup(client_port).await;
+        let (r, listener, debug_port) = setup(client_port).await;
         r.await.unwrap();
 
         // Only use one connection because when we specify a debug port we can't use multiple connections
@@ -105,9 +107,6 @@ mod tests {
         // now try via the debug port
         // We can't reliably get the client port to do the lookup, but in this
         // test we should only see one debug port so we can use that
-        let debug_ports = port_mapper.get_all_debug_ports().await;
-        assert_eq!(debug_ports.len(), 1);
-        let debug_port = debug_ports[0];
         let mut conn = sqlx::PgConnection::connect(&format!(
             "postgresql://postgres:postgres@localhost:{debug_port}/postgres",
         ))

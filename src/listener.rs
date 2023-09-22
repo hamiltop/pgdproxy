@@ -9,10 +9,10 @@ use tokio::{
 use crate::forwarder;
 
 pub struct Config {
-    pub port: u16,
+    pub binding: String,
     pub target_address: String,
     pub ch: Option<oneshot::Sender<()>>,
-    pub port_mapper: Option<PortMapper>,
+    pub debug_binding: Option<String>,
 }
 
 pub struct Listener;
@@ -20,21 +20,20 @@ pub struct Listener;
 impl Listener {
     /// Starts our listener. This will fire on Config.ch once we're ready to accept connections
     pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-        let addr = format!("127.0.0.1:{}", config.port);
         let target_address = config.target_address.clone();
-        let listener = TcpListener::bind(&addr).await?;
+        let listener = TcpListener::bind(&config.binding).await?;
         if let Some(ch) = config.ch {
             ch.send(()).or(Err("Oneshot Failed"))?;
         }
         loop {
             match listener.accept().await {
                 Ok((socket, _)) => {
-                    let port_mapper = config.port_mapper.clone();
                     let target_address = target_address.clone();
+                    let debug_binding = config.debug_binding.clone();
                     task::spawn(async move {
                         let target = TcpStream::connect(target_address).await.unwrap();
 
-                        match forwarder::Forwarder::start(socket, target, port_mapper).await {
+                        match forwarder::Forwarder::start(socket, target, debug_binding).await {
                             Ok(_) => {}
                             Err(e) => println!("Error: {}", e),
                         };

@@ -7,11 +7,8 @@ use tokio::{
 };
 use tokio_util::codec::Encoder;
 
-use crate::{
-    listener::PortMapper,
-    pg_codec::{
-        ForwardingBackendCodec, ForwardingClientCodec, FrameInfo, SslOrStartup, StartupRequest,
-    },
+use crate::pg_codec::{
+    ForwardingBackendCodec, ForwardingClientCodec, FrameInfo, SslOrStartup, StartupRequest,
 };
 use futures::{SinkExt, StreamExt};
 use tokio_util::codec::{Decoder, Framed};
@@ -27,12 +24,12 @@ pub enum Forwarder {
     Start {
         client: TcpStream,
         target: TcpStream,
-        port_mapper: Option<PortMapper>,
+        debug_binding: Option<String>,
     },
     Authenticated {
         client: Framed<TcpStream, ForwardingClientCodec>,
         target: Framed<TcpStream, ForwardingBackendCodec>,
-        port_mapper: Option<PortMapper>,
+        debug_binding: Option<String>,
     },
     Listening {
         state: ForwarderState,
@@ -61,12 +58,12 @@ impl Forwarder {
     pub async fn start(
         client: TcpStream,
         target: TcpStream,
-        port_mapper: Option<PortMapper>,
+        debug_binding: Option<String>,
     ) -> Result<Self, Error> {
         let mut state = Self::Start {
             client,
             target,
-            port_mapper,
+            debug_binding,
         };
         loop {
             state = state.run().await?;
@@ -78,7 +75,7 @@ impl Forwarder {
             Forwarder::Start {
                 mut client,
                 mut target,
-                port_mapper,
+                debug_binding,
             } => {
                 Self::startup(&mut client, &mut target).await?;
                 let mut client = ForwardingClientCodec.framed(client);
@@ -88,26 +85,39 @@ impl Forwarder {
                 Self::Authenticated {
                     client,
                     target,
-                    port_mapper,
+                    debug_binding,
                 }
             }
             Forwarder::Authenticated {
                 client,
                 target,
-                port_mapper,
+                debug_binding,
             } => {
-                // TODO: If a Debug Port is specified, we will only be able to have one connection.
-                // Find a way to make this discoverable. Tricky since the forwarder spawns a new task
-                // for each connection.
-                let debug_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                // TODO: If a Debug Binding is specified, we will try to spawn a debug listener on
+                // the specified port. If not available, we'll increment until we find an available one.
+                let binding = debug_binding
+                    .as_ref()
+                    .and_then(|s| s.split_once(":"))
+                    .and_then(|(host, port)| port.parse::<u16>().ok().map(|port| (host, port)));
 
-                let debug_port = debug_listener.local_addr().unwrap().port();
-                // We can use the target port as the client port because that's what postgres will report with
-                // `select inet_client_port()`
-                let client_port = target.get_ref().local_addr().unwrap().port();
-                if let Some(pm) = port_mapper.as_ref() {
-                    pm.add(client_port, debug_port).await;
-                }
+                let debug_listener = if let Some((host, port_base)) = binding {
+                    let mut listener = None;
+                    for port in port_base..(port_base + 10) {
+                        match TcpListener::bind(format!("{host}:{port}")).await {
+                            Ok(new_listener) => {
+                                listener = Some(new_listener);
+                                break;
+                            }
+                            Err(_) => {
+                                continue;
+                            }
+                        }
+                    }
+                    listener.unwrap_or(TcpListener::bind("localhost:0").await.unwrap())
+                } else {
+                    TcpListener::bind("localhost:0").await.unwrap()
+                };
+
                 println!(
                     "Listening for debug on port {}",
                     debug_listener.local_addr().unwrap().port()
@@ -216,12 +226,10 @@ impl Forwarder {
                             }
                             Some(Err(e)) => {
                                 println!("Error reading from debug client: {:?}", e);
-                                debug_client.close().await.unwrap();
                                 Self::Listening { state }
                             }
                             None => {
                                 println!("Debug client disconnected");
-                                debug_client.close().await.unwrap();
                                 Self::Listening { state }
                             }
                         }
