@@ -41,7 +41,7 @@ mod tests {
         let debug_binding = "localhost:44440".to_string();
         let (s, r) = oneshot::channel::<()>();
         let listener = tokio::spawn(async move {
-            let _r = Listener::start(listener::Config {
+            let _r = Listener::new().start(listener::Config {
                 binding,
                 target_address,
                 ch: Some(s),

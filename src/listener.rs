@@ -15,11 +15,27 @@ pub struct Config {
     pub debug_binding: Option<String>,
 }
 
-pub struct Listener;
+pub struct Listener {
+    // Track active connections so we can shut them down
+    active_connections: Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>>,
+}
 
 impl Listener {
+    pub fn new() -> Self {
+        Listener {
+            active_connections: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    
+    // Shut down all active connections
+    pub async fn shutdown(&self) {
+        let mut connections = self.active_connections.lock().await;
+        for (_id, sender) in connections.drain() {
+            let _ = sender.send(());
+        }
+    }
     /// Starts our listener. This will fire on Config.ch once we're ready to accept connections
-    pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start(self, config: Config) -> Result<(), Box<dyn std::error::Error>> {
         let target_address = config.target_address.clone();
         let listener = TcpListener::bind(&config.binding).await?;
         if let Some(ch) = config.ch {
@@ -30,13 +46,50 @@ impl Listener {
                 Ok((socket, _)) => {
                     let target_address = target_address.clone();
                     let debug_binding = config.debug_binding.clone();
-                    task::spawn(async move {
+                    // Create a shutdown channel for this connection
+                    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+                    
+                    // Spawn the task with the shutdown channel
+                    let handle = task::spawn(async move {
                         let target = TcpStream::connect(target_address).await.unwrap();
 
-                        match forwarder::Forwarder::start(socket, target, debug_binding).await {
+                        match forwarder::Forwarder::start(
+                            socket, 
+                            target, 
+                            debug_binding, 
+                            Some(shutdown_receiver)
+                        ).await {
                             Ok(_) => {}
                             Err(e) => println!("Error: {}", e),
                         };
+                    });
+                    
+                    // Store the shutdown sender in our active connections map
+                    let handle_id = handle.id();
+                    let active_connections = self.active_connections.clone();
+                    {
+                        let mut connections = active_connections.lock().await;
+                        connections.insert(handle_id.as_u64(), shutdown_sender.clone());
+                    }
+                    
+                    // First make sure the shutdown is sent when the task completes
+                    tokio::spawn(async move {
+                        // Send shutdown when either the task completes or the maximum time is reached
+                        tokio::select! {
+                            _ = handle => {
+                                // Task completed normally
+                            }
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
+                                // Safety timeout to avoid resource leaks
+                            }
+                        }
+                        
+                        // Always send shutdown signal when we exit
+                        let _ = shutdown_sender.send(());
+                        
+                        // Remove from active connections
+                        let mut connections = active_connections.lock().await;
+                        connections.remove(&handle_id.as_u64());
                     });
                 }
                 Err(e) => {

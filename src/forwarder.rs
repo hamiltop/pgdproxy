@@ -59,6 +59,7 @@ impl Forwarder {
         client: TcpStream,
         target: TcpStream,
         debug_binding: Option<String>,
+        mut shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> Result<Self, Error> {
         let mut state = Self::Start {
             client,
@@ -66,8 +67,19 @@ impl Forwarder {
             debug_binding,
         };
         loop {
+            // Check if we received a shutdown signal
+            if let Some(ref mut shutdown) = shutdown {
+                if shutdown.try_recv().is_ok() {
+                    // Shutdown signal received, exit the loop
+                    break;
+                }
+            }
+            
+            // Process the next state
             state = state.run().await?;
         }
+        
+        Ok(state)
     }
 
     async fn run(self) -> Result<Self, Error> {
